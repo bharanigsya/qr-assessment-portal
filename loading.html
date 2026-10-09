@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>QR Solutions — Starting Assessment</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #F4F6F9;
+    --card: #FFFFFF;
+    --text: #1A2332;
+    --muted: #5A6A7E;
+    --dim: #8A96A8;
+    --accent: #3B6FE0;
+    --gold: #C4922A;
+    --line: #D8DEE8;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    min-height: 100vh;
+    font-family: 'DM Sans', system-ui, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+    background-image:
+      radial-gradient(ellipse 80% 50% at 50% -20%, rgba(59,111,224,0.10), transparent);
+  }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    padding: 40px 36px;
+    max-width: 420px;
+    width: 100%;
+    text-align: center;
+    box-shadow: 0 12px 40px rgba(26,35,50,0.08);
+  }
+  .logo {
+    width: 56px; height: 56px;
+    margin: 0 auto 20px;
+    border-radius: 12px;
+    background: #fff;
+    border: 1px solid var(--line);
+    display: flex; align-items: center; justify-content: center;
+    overflow: hidden;
+  }
+  .logo img { width: 100%; height: 100%; object-fit: contain; }
+  .eyebrow {
+    font-size: 11px; letter-spacing: 0.14em; text-transform: uppercase;
+    color: var(--dim); font-weight: 600; margin-bottom: 8px;
+  }
+  h1 {
+    font-family: 'Instrument Serif', Georgia, serif;
+    font-size: 26px; font-weight: 400;
+    letter-spacing: -0.02em; margin-bottom: 10px;
+  }
+  p {
+    font-size: 14.5px; color: var(--muted); line-height: 1.55;
+    margin-bottom: 28px;
+  }
+  .spinner {
+    width: 40px; height: 40px;
+    margin: 0 auto 18px;
+    border: 3px solid var(--line);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .status {
+    font-size: 13px; color: var(--dim); font-weight: 500;
+    min-height: 20px;
+  }
+  .status strong { color: var(--accent); }
+  .hint {
+    margin-top: 24px; padding-top: 20px;
+    border-top: 1px solid var(--line);
+    font-size: 12.5px; color: var(--dim); line-height: 1.5;
+  }
+  .manual {
+    display: none; margin-top: 20px;
+  }
+  .manual a {
+    display: inline-block;
+    background: var(--accent); color: #fff;
+    text-decoration: none; font-weight: 600; font-size: 14px;
+    padding: 12px 22px; border-radius: 8px;
+  }
+  .manual a:hover { background: #2F5BC4; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <div class="logo">
+      <!-- Optional: replace with your logo URL -->
+      <svg width="32" height="32" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <rect width="32" height="32" rx="8" fill="#3B6FE0"/>
+        <text x="16" y="21" text-anchor="middle" fill="white" font-family="system-ui" font-weight="700" font-size="11">QRS</text>
+      </svg>
+    </div>
+    <div class="eyebrow">QR Solutions · Walk-In Assessment</div>
+    <h1>Starting your test…</h1>
+    <p>Please wait a moment while we prepare the assessment portal. This usually takes a few seconds.</p>
+    <div class="spinner" aria-hidden="true"></div>
+    <div class="status" id="status">Connecting to portal…</div>
+    <div class="manual" id="manual">
+      <a id="manualLink" href="#">Open assessment now</a>
+    </div>
+    <div class="hint">
+      Keep this screen open. You’ll be taken to the registration page automatically.
+    </div>
+  </div>
+
+<script>
+  // ========== CONFIG ==========
+  // Put your live Render URL here (no trailing slash)
+  const PORTAL_URL = 'https://qr-assessment-backend.onrender.com';
+  // ============================
+
+  const statusEl = document.getElementById('status');
+  const manualEl = document.getElementById('manual');
+  const manualLink = document.getElementById('manualLink');
+  manualLink.href = PORTAL_URL;
+
+  const messages = [
+    'Connecting to portal…',
+    'Waking up the server…',
+    'Almost ready…',
+    'Loading assessment…'
+  ];
+  let msgIndex = 0;
+  let attempts = 0;
+  const maxAttempts = 40; // ~40–60 seconds
+
+  function setStatus(text) {
+    statusEl.innerHTML = text;
+  }
+
+  async function checkReady() {
+    attempts++;
+    try {
+      // Try a lightweight request; any response means the server is up
+      const controller = new AbortController();
+      const t = setTimeout(() => controller.abort(), 8000);
+      // Prefer /health (JSON). Fall back to root if needed.
+      let ok = false;
+      try {
+        const res = await fetch(PORTAL_URL + '/health', {
+          method: 'GET',
+          cache: 'no-store',
+          signal: controller.signal
+        });
+        clearTimeout(t);
+        if (res.ok) ok = true;
+      } catch (_) {
+        // health may fail on older deploys — try root with no-cors
+      }
+      if (!ok) {
+        const controller2 = new AbortController();
+        const t2 = setTimeout(() => controller2.abort(), 8000);
+        await fetch(PORTAL_URL + '/', {
+          method: 'GET',
+          mode: 'no-cors',
+          cache: 'no-store',
+          signal: controller2.signal
+        });
+        clearTimeout(t2);
+        ok = true; // no-cors: reached host
+      }
+      setStatus('<strong>Ready!</strong> Opening assessment…');
+      setTimeout(() => { window.location.replace(PORTAL_URL); }, 400);
+      return true;
+    } catch (e) {
+      if (attempts >= maxAttempts) {
+        setStatus('Taking longer than usual.');
+        manualEl.style.display = 'block';
+        return false;
+      }
+      msgIndex = Math.min(msgIndex + 1, messages.length - 1);
+      setStatus(messages[msgIndex] + ' <strong>(' + attempts + ')</strong>');
+      return false;
+    }
+  }
+
+  async function loop() {
+    const ok = await checkReady();
+    if (!ok && attempts < maxAttempts) {
+      setTimeout(loop, 1500);
+    }
+  }
+
+  // Start after a brief moment so the UI paints first
+  setTimeout(loop, 300);
+
+  // Fallback: hard redirect after 45s even if checks fail
+  setTimeout(() => {
+    if (attempts < maxAttempts) {
+      setStatus('Opening portal…');
+      window.location.replace(PORTAL_URL);
+    }
+  }, 45000);
+</script>
+</body>
+</html>
