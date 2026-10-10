@@ -145,34 +145,22 @@
   async function checkReady() {
     attempts++;
     try {
-      // Try a lightweight request; any response means the server is up
+      // Only a real 200 from /health counts as "awake". During a cold start the host
+      // answers with a 5xx wake-up page (or the request fails), so we keep waiting.
       const controller = new AbortController();
       const t = setTimeout(() => controller.abort(), 8000);
-      // Prefer /health (JSON). Fall back to root if needed.
-      let ok = false;
+      let res;
       try {
-        const res = await fetch(PORTAL_URL + '/health', {
+        res = await fetch(PORTAL_URL + '/health', {
           method: 'GET',
           cache: 'no-store',
           signal: controller.signal
         });
+      } finally {
         clearTimeout(t);
-        if (res.ok) ok = true;
-      } catch (_) {
-        // health may fail on older deploys — try root with no-cors
       }
-      if (!ok) {
-        const controller2 = new AbortController();
-        const t2 = setTimeout(() => controller2.abort(), 8000);
-        await fetch(PORTAL_URL + '/', {
-          method: 'GET',
-          mode: 'no-cors',
-          cache: 'no-store',
-          signal: controller2.signal
-        });
-        clearTimeout(t2);
-        ok = true; // no-cors: reached host
-      }
+      if (!res.ok) throw new Error('not ready: ' + res.status);
+
       setStatus('<strong>Ready!</strong> Opening assessment…');
       setTimeout(() => { window.location.replace(PORTAL_URL); }, 400);
       return true;

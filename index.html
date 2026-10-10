@@ -392,39 +392,45 @@ const QUESTION_DATA = [{"id":"salesforce","name":"Salesforce","sets":{"A":[{"tit
    device/browser, instead of being trapped in one browser's local storage. */
 (function(){
   const API_BASE = '';
+  let authToken = null;   // staff session token, kept in memory only
+
+  async function request(method, url, body){
+    const headers = {};
+    if(body !== undefined) headers['Content-Type'] = 'application/json';
+    if(authToken) headers['Authorization'] = 'Bearer ' + authToken;
+    const res = await fetch(API_BASE + url, { method, headers, body: body !== undefined ? JSON.stringify(body) : undefined });
+    let data = null;
+    try{ data = await res.json(); }catch(e){}
+    if(res.status === 401 && authToken){
+      authToken = null;
+      if(typeof sessionExpired === 'function') sessionExpired();
+    }
+    return { ok: res.ok, status: res.status, data };
+  }
+
+  window.api = {
+    setToken(t){ authToken = t || null; },
+    get(url){ return request('GET', url).catch(()=>({ok:false,status:0,data:null})); },
+    post(url, body){ return request('POST', url, body).catch(()=>({ok:false,status:0,data:null})); },
+    del(url){ return request('DELETE', url).catch(()=>({ok:false,status:0,data:null})); }
+  };
 
   window.storage = {
     async set(key, value, shared){
-      try{
-        const res = await fetch(`${API_BASE}/api/storage`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ key, value, shared: !!shared })
-        });
-        if(!res.ok) return null;
-        return await res.json();
-      }catch(e){ return null; }
+      const r = await window.api.post('/api/storage', { key, value, shared: !!shared });
+      return r.ok ? r.data : null;
     },
     async get(key, shared){
-      try{
-        const res = await fetch(`${API_BASE}/api/storage/${encodeURIComponent(key)}?shared=${!!shared}`);
-        if(!res.ok) return null;
-        return await res.json();
-      }catch(e){ return null; }
+      const r = await window.api.get(`/api/storage/${encodeURIComponent(key)}?shared=${!!shared}`);
+      return r.ok ? r.data : null;
     },
     async delete(key, shared){
-      try{
-        const res = await fetch(`${API_BASE}/api/storage/${encodeURIComponent(key)}?shared=${!!shared}`, { method: 'DELETE' });
-        if(!res.ok) return null;
-        return await res.json();
-      }catch(e){ return null; }
+      const r = await window.api.del(`/api/storage/${encodeURIComponent(key)}?shared=${!!shared}`);
+      return r.ok ? r.data : null;
     },
     async list(prefix, shared){
-      try{
-        const res = await fetch(`${API_BASE}/api/storage-list?prefix=${encodeURIComponent(prefix||'')}&shared=${!!shared}`);
-        if(!res.ok) return null;
-        return await res.json();
-      }catch(e){ return null; }
+      const r = await window.api.get(`/api/storage-list?prefix=${encodeURIComponent(prefix||'')}&shared=${!!shared}`);
+      return r.ok ? r.data : null;
     }
   };
 })();
@@ -446,17 +452,10 @@ let state = {
   _lastViolationAt: 0,
 };
 
-const DEFAULT_ADMIN_ID = "admin";
-const DEFAULT_ADMIN_PASS = "QRHR2026"; // default admin password, seeded into shared storage on first run
-
-async function loadCredentials(){
-  let creds = await storageGet('app:credentials', true);
-  if(!creds || !creds.admin){
-    creds = { admin: { id: DEFAULT_ADMIN_ID, pass: DEFAULT_ADMIN_PASS }, coordinators: [] };
-    await storageSet('app:credentials', creds, true);
-  }
-  if(!creds.coordinators) creds.coordinators = [];
-  return creds;
+// Staff login is verified by the server (/api/login). No credentials live in this file.
+function sessionExpired(){
+  state.role = null; state.staffName = null; state.view = 'hrlogin'; render();
+  showAlert('Your session has expired. Please log in again.');
 }
 
 function el(html){ const d=document.createElement('div'); d.innerHTML=html.trim(); return d.firstElementChild; }
@@ -558,13 +557,11 @@ async function goInstructions(){
   state.role = QUESTION_DATA.find(r=>r.id===state.candidate.roleId);
   const btn = $('#continueBtn');
   if(btn){ btn.disabled = true; btn.textContent = 'Checking records…'; }
-  const keys = await storageList(`result:${state.candidate.roleId}:`, true);
-  const enteredName = state.candidate.name.trim().toLowerCase();
   let already = false;
-  for(const k of keys){
-    const rec = await storageGet(k, true);
-    if(rec && rec.name && rec.name.trim().toLowerCase()===enteredName){ already = true; break; }
-  }
+  try{
+    const chk = await window.api.post('/api/check-attempt', { roleId: state.candidate.roleId, name: state.candidate.name });
+    already = !!(chk.ok && chk.data && chk.data.already);
+  }catch(e){}
   if(already){
     $('#startErr').textContent = 'Our records show this name has already completed the assessment for this role. Please speak with the recruitment desk if this is incorrect.';
     $('#startErr').classList.remove('hidden');
@@ -602,7 +599,7 @@ function renderInstructions(){
   return wrap;
 }
 
-function escapeHtml(s){ const d=document.createElement('div'); d.textContent=s; return d.innerHTML; }
+function escapeHtml(s){ return String(s==null?'':s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 
 /* ============ TEST VIEW ============ */
 function shuffleArray(arr){
@@ -1025,7 +1022,7 @@ function renderHrLogin(){
     <label class="field-label">Login ID</label>
     <input type="text" id="hrId" placeholder="e.g. admin">
     <label class="field-label">Password</label>
-    <input type="text" id="hrPass" placeholder="••••••••">
+    <input type="password" id="hrPass" autocomplete="current-password" placeholder="••••••••">
     <div class="err-text hidden" id="hrErr">Incorrect ID or password.</div>
     <div class="btn-row">
       <button class="btn btn-outline" onclick="state.view='start';render();">← Back to test</button>
@@ -1039,22 +1036,20 @@ async function tryHrLogin(){
   const id = $('#hrId').value.trim();
   const pass = $('#hrPass').value.trim();
   const btn = $('#hrLoginBtn'); if(btn) btn.disabled = true;
-  const creds = await loadCredentials();
-  if(id && pass && id===creds.admin.id && pass===creds.admin.pass){
-    state.role = 'admin'; state.staffName = 'Admin';
-    state.view='admin'; render(); loadAdminData();
-    return;
-  }
-  const coord = creds.coordinators.find(c=>c.id===id && c.pass===pass);
-  if(coord){
-    state.role = 'coordinator'; state.staffName = coord.name;
+  const r = await window.api.post('/api/login', { id, pass });
+  if(r.ok && r.data && r.data.token){
+    window.api.setToken(r.data.token);
+    state.role = r.data.role; state.staffName = r.data.name;
     state.view='admin'; render(); loadAdminData();
     return;
   }
   if(btn) btn.disabled = false;
-  $('#hrErr').classList.remove('hidden');
+  const errEl = $('#hrErr');
+  errEl.textContent = r.status===429 ? 'Too many attempts. Please wait a few minutes and try again.' : 'Incorrect ID or password.';
+  errEl.classList.remove('hidden');
 }
 function exitDashboard(){
+  window.api.setToken(null);
   state.role=null; state.staffName=null; state.view='start'; render();
 }
 
@@ -1075,7 +1070,7 @@ function renderAdmin(){
       <span class="small-link" onclick="exitDashboard()">Log out</span>
     </div>
     <div class="agree-row" style="background:var(--bad-bg);border-color:var(--bad);margin-top:16px;">
-      <label style="color:var(--slate);"><b>Important:</b> this page stores results in this browser only — it does not sync across devices. If a candidate took the test on a different computer, tablet, or browser than this one, their result will not appear here. Always run the candidate test and check the admin dashboard on the same device/browser, or set up shared server storage instead.</label>
+      <label style="color:var(--slate);"><b>Note:</b> results are stored on the server, so submissions from any device appear here.</label>
     </div>
     <div class="stat-row" id="statRow"><span class="loading-dot"></span> Loading results…</div>
     <div class="toolbar">
@@ -1128,9 +1123,12 @@ function renderAdmin(){
   return wrap;
 }
 
+let accessCoordinators = [];
 async function renderAdminAccessPanel(){
   const panel = $('#accessPanel'); if(!panel) return;
-  const creds = await loadCredentials();
+  const acc = await window.api.get('/api/admin/accounts');
+  const creds = (acc.ok && acc.data) ? acc.data : { admin: { id: '' }, coordinators: [] };
+  accessCoordinators = creds.coordinators;
   panel.innerHTML = `
     <div class="section-title" style="margin-top:0;">Evaluation Criteria</div>
     <div class="section-sub">Admin only — sets the score cutoffs behind each candidate's Recommendation label</div>
@@ -1161,16 +1159,16 @@ async function renderAdminAccessPanel(){
       <p style="font-weight:600;font-size:14px;margin:0 0 10px;">Coordinators (view marks &amp; candidates only — cannot edit or delete)</p>
       <div id="coordList">
         ${creds.coordinators.length===0 ? `<p style="font-size:13px;color:var(--slate-soft);">No coordinators added yet.</p>` :
-          creds.coordinators.map(c=>`
+          creds.coordinators.map((c,i)=>`
             <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid var(--line);font-size:13.5px;">
-              <span><b>${escapeHtml(c.name)}</b> <span class="mono" style="color:var(--slate-soft);">· ID: ${escapeHtml(c.id)} · password: ${escapeHtml(c.pass)}</span></span>
-              <span class="small-link" style="color:var(--bad);" onclick="removeCoordinator('${c.id}')">Remove access</span>
+              <span><b>${escapeHtml(c.name)}</b> <span class="mono" style="color:var(--slate-soft);">· ID: ${escapeHtml(c.id)}</span></span>
+              <span class="small-link" style="color:var(--bad);" onclick="removeCoordinator(${i})">Remove access</span>
             </div>`).join('')}
       </div>
       <div style="display:flex;gap:10px;margin-top:14px;flex-wrap:wrap;">
         <input type="text" id="coordName" placeholder="Coordinator name" style="flex:1;min-width:150px;">
         <input type="text" id="coordId" placeholder="Login ID" style="flex:1;min-width:120px;">
-        <input type="text" id="coordPass" placeholder="Password" style="flex:1;min-width:120px;">
+        <input type="text" id="coordPass" placeholder="Password (min 8 chars)" style="flex:1;min-width:120px;">
         <button class="btn btn-gold" onclick="addCoordinator()">Add Coordinator</button>
       </div>
       <div class="err-text hidden" id="coordErr"></div>
@@ -1180,7 +1178,7 @@ async function renderAdminAccessPanel(){
       <p style="font-weight:600;font-size:14px;margin:0 0 10px;">Update Admin Login</p>
       <div style="display:flex;gap:10px;flex-wrap:wrap;">
         <input type="text" id="newAdminId" placeholder="New admin ID" value="${escapeHtml(creds.admin.id)}" style="flex:1;min-width:150px;">
-        <input type="text" id="newAdminPass" placeholder="New admin password" style="flex:1;min-width:150px;">
+        <input type="password" id="newAdminPass" autocomplete="new-password" placeholder="New admin password (min 8 chars)" style="flex:1;min-width:150px;">
         <button class="btn btn-outline" onclick="changeAdminPass()">Update</button>
       </div>
     </div>
@@ -1209,19 +1207,17 @@ async function addCoordinator(){
   const pass = $('#coordPass').value.trim();
   const errEl = $('#coordErr'); errEl.classList.add('hidden');
   if(!name || !id || !pass){ errEl.textContent='Enter a name, login ID, and password.'; errEl.classList.remove('hidden'); return; }
-  const creds = await loadCredentials();
-  if(id===creds.admin.id || creds.coordinators.some(c=>c.id===id)){
-    errEl.textContent='That login ID is already in use — choose a unique one.'; errEl.classList.remove('hidden'); return;
+  const r = await window.api.post('/api/admin/coordinators', { name, id, pass });
+  if(!r.ok){
+    errEl.textContent = (r.data && r.data.error) || 'Could not add coordinator.';
+    errEl.classList.remove('hidden'); return;
   }
-  creds.coordinators.push({ id, name, pass });
-  await storageSet('app:credentials', creds, true);
   renderAdminAccessPanel();
 }
-async function removeCoordinator(id){
+async function removeCoordinator(idx){
+  const c = accessCoordinators[idx]; if(!c) return;
   showConfirm('Remove this coordinator\'s access? They will no longer be able to log in.', async ()=>{
-    const creds = await loadCredentials();
-    creds.coordinators = creds.coordinators.filter(c=>c.id!==id);
-    await storageSet('app:credentials', creds, true);
+    await window.api.del('/api/admin/coordinators/' + encodeURIComponent(c.id));
     renderAdminAccessPanel();
   });
 }
@@ -1229,11 +1225,9 @@ async function changeAdminPass(){
   const newId = $('#newAdminId').value.trim();
   const newPass = $('#newAdminPass').value.trim();
   if(!newId){ showAlert('Admin ID cannot be empty.'); return; }
-  if(newPass && newPass.length<4){ showAlert('Password should be at least 4 characters.'); return; }
-  const creds = await loadCredentials();
-  creds.admin.id = newId;
-  if(newPass) creds.admin.pass = newPass;
-  await storageSet('app:credentials', creds, true);
+  if(newPass && newPass.length<8){ showAlert('Password should be at least 8 characters.'); return; }
+  const r = await window.api.post('/api/admin/account', { id: newId, pass: newPass });
+  if(!r.ok){ showAlert((r.data && r.data.error) || 'Could not update the admin login.'); return; }
   $('#newAdminPass').value='';
   showAlert('Admin login updated. Use the new ID/password next time you log in.');
 }
@@ -1359,8 +1353,8 @@ function renderAdminTable(){
       <td style="font-size:12px;">${new Date(r.submittedAt).toLocaleString()}</td>
       <td>
         <span class="small-link" onclick="viewDetail(${adminData.indexOf(r)})">View</span>
-        ${state.role==='admin' && (wasTerminated || flagCount>=1) ? ` &nbsp;·&nbsp; <span class="small-link" style="color:var(--gold-2);" onclick="freeCandidate('${r._key}','${escapeHtml(r.name).replace(/'/g,"&#39;")}')">Free to retake</span>` : ''}
-        ${state.role==='admin' ? ` &nbsp;·&nbsp; <span class="small-link" style="color:var(--bad);" onclick="deleteRecord('${r._key}')">Delete</span>` : ''}
+        ${state.role==='admin' && (wasTerminated || flagCount>=1) ? ` &nbsp;·&nbsp; <span class="small-link" style="color:var(--gold-2);" onclick="freeCandidate(${adminData.indexOf(r)})">Free to retake</span>` : ''}
+        ${state.role==='admin' ? ` &nbsp;·&nbsp; <span class="small-link" style="color:var(--bad);" onclick="deleteRecord(${adminData.indexOf(r)})">Delete</span>` : ''}
       </td>
     </tr>`;
   });
@@ -1479,7 +1473,9 @@ function showConfirm(message, onConfirm){
   $('#modalBack').classList.add('show');
 }
 
-async function deleteRecord(key){
+async function deleteRecord(idx){
+  const rec = adminData[idx]; if(!rec) return;
+  const key = rec._key;
   if(state.role!=='admin') return;
   showConfirm('Permanently delete this candidate\'s result? This cannot be undone.', async ()=>{
     try{ await window.storage.delete(key, true); }catch(e){}
@@ -1488,7 +1484,9 @@ async function deleteRecord(key){
 }
 // Clears a terminated/flagged candidate's stored result so the "already completed" check
 // no longer blocks them, letting them walk up and take the assessment again.
-async function freeCandidate(key, name){
+async function freeCandidate(idx){
+  const rec = adminData[idx]; if(!rec) return;
+  const key = rec._key, name = rec.name;
   if(state.role!=='admin') return;
   showConfirm(`Clear ${name}'s terminated/flagged result and allow them to retake this assessment? Their current submission will be removed so a fresh attempt is unblocked.`, async ()=>{
     try{ await window.storage.delete(key, true); }catch(e){}
@@ -1527,13 +1525,11 @@ async function exportAllDataJson(){
   const resultKeys = await storageList('result:', true);
   const results = {};
   for(const k of resultKeys){ results[k] = await storageGet(k, true); }
-  const credentials = await storageGet('app:credentials', true);
   const evalCfg = await storageGet('app:evalConfig', true);
   const bundle = {
     exportedAt: new Date().toISOString(),
     source: 'QR Solutions Test Portal',
     results,
-    credentials,
     evalConfig: evalCfg
   };
   const blob = new Blob([JSON.stringify(bundle, null, 2)], {type:'application/json'});
@@ -1560,12 +1556,11 @@ async function importDataFromFile(file){
     }
     const resultCount = Object.keys(bundle.results).length;
     showConfirm(
-      `This will import ${resultCount} candidate result(s)${bundle.credentials ? ', plus admin/coordinator logins,' : ''} into this browser. Existing records with the same key are overwritten; nothing else is deleted. Continue?`,
+      `This will import ${resultCount} candidate result(s) into this browser. Existing records with the same key are overwritten; nothing else is deleted. Continue?`,
       async ()=>{
         for(const [key, value] of Object.entries(bundle.results)){
           if(value) await storageSet(key, value, true);
         }
-        if(bundle.credentials) await storageSet('app:credentials', bundle.credentials, true);
         if(bundle.evalConfig) await storageSet('app:evalConfig', bundle.evalConfig, true);
         showAlert('Backup imported successfully.');
         loadAdminData();
